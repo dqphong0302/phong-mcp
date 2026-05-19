@@ -1,0 +1,12 @@
+services:
+  phong-mcp:
+    build: .
+    image: ghcr.io/phongdang/phong-mcp:latest
+    ports:
+      - "3100:3100"
+    environment:
+      - TRANSPORT=http
+      - PORT=3100
+      - NROUTER_API_KEY=${NROUTER_API_KEY}
+      - NROUTER_BASE_URL=${NROUTER_BASE_URL:-https://9router.phongdang.io.vn}
+    restart: unless-stopped
