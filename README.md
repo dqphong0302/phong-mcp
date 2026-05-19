@@ -1,0 +1,1 @@
+# phong-mcp\n\nAI-powered MCP server with web search, academic research, image generation, and content analysis tools.\n
