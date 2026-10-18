@@ -1,34 +1,20 @@
+import { errorMessage } from "../academic/errors.ts";
+import type { Raw } from "../academic/types.ts";
 import { z } from "zod";
 import { mkdir, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import path from "node:path";
 import sharp from "sharp";
-import { ok, err, fmtErr } from "../utils.js";
-
-// ── Config (read once at startup) ─────────────────────────────────────────────
-const BASE_URL = (
-    process.env["9ROUTER_IMAGE_BASE_URL"] ||
-    process.env["9ROUTER_BASE_URL"] ||
-    "https://ai-proxy.phongdang.io.vn/images"
-).replace(/\/$/, "");
-
-const API_KEY = (
-    process.env["9ROUTER_IMAGE_API_KEY"] ||
-    process.env["9ROUTER_API_KEY"] ||
-    process.env.NINE_ROUTER_API_KEY ||
-    ""
-);
-
-const DEFAULT_MODEL   = process.env["9ROUTER_IMAGE_MODEL"] || "cx/gpt-5.4-image";
-const TIMEOUT_MS      = Number(process.env["9ROUTER_TIMEOUT_MS"] || process.env["9ROUTER_IMAGE_TIMEOUT_MS"] || 180000);
-const DEFAULT_OUT_DIR = process.env["9ROUTER_IMAGE_OUTPUT_DIR"] || path.resolve(process.cwd(), "temp");
+import { ok, err, fmtErr } from "../utils.ts";
+import { image as config } from "../config.ts";
+import { proxyAwareFetch } from "../http.ts";
 
 // ── Internal helpers ──────────────────────────────────────────────────────────
-function safeJsonParse(text) {
+function safeJsonParse(text: Raw) {
     try { return JSON.parse(text); } catch { return null; }
 }
 
-function parseSseBody(text) {
+function parseSseBody(text: Raw) {
     const events = [], dataLines = [];
     for (const rawLine of text.split(/\r?\n/)) {
         const line = rawLine.trimEnd();
@@ -41,7 +27,13 @@ function parseSseBody(text) {
     return { events, dataLines };
 }
 
-function findImageHints(value, p = "root", acc = []) {
+interface ImageHint {
+    path: string;
+    kind: string;
+    value: string;
+}
+
+function findImageHints(value: Raw, p = "root", acc: ImageHint[] = []): ImageHint[] {
     if (value == null) return acc;
     if (typeof value === "string") {
         const lower     = value.toLowerCase();
@@ -60,14 +52,14 @@ function findImageHints(value, p = "root", acc = []) {
     return acc;
 }
 
-function getGeneratedImages(payload) {
+function getGeneratedImages(payload: Raw) {
     if (!payload || !Array.isArray(payload.data)) return [];
     return payload.data
-        .map((item, index) => (item && typeof item.b64_json === "string" ? { index, b64Json: item.b64_json } : null))
+        .map((item: Raw, index: Raw) => (item && typeof item.b64_json === "string" ? { index, b64Json: item.b64_json } : null))
         .filter(Boolean);
 }
 
-function sanitizeFileStem(text) {
+function sanitizeFileStem(text: Raw) {
     return text.normalize("NFKD")
         .replace(/[̀-ͯ]/g, "")
         .replace(/[^a-zA-Z0-9._-]+/g, "-")
@@ -75,14 +67,14 @@ function sanitizeFileStem(text) {
         .slice(0, 80) || "image";
 }
 
-async function saveGeneratedImages(payload, { prompt, outputFormat, outputDir }) {
+async function saveGeneratedImages(payload: Raw, { prompt, outputFormat, outputDir }: Raw) {
     const images = getGeneratedImages(payload);
     if (images.length === 0) return [];
-    const targetDir = path.resolve(outputDir || DEFAULT_OUT_DIR);
+    const targetDir = path.resolve(outputDir || config.outputDir);
     await mkdir(targetDir, { recursive: true });
     const stem = sanitizeFileStem(prompt);
     const ts   = new Date().toISOString().replace(/[:.]/g, "-");
-    return Promise.all(images.map(async (image) => {
+    return Promise.all(images.map(async (image: Raw) => {
         const filename = `${ts}-${stem}-${image.index + 1}.${outputFormat}`;
         const filePath = path.join(targetDir, filename);
         await writeFile(filePath, Buffer.from(image.b64Json, "base64"));
@@ -90,7 +82,7 @@ async function saveGeneratedImages(payload, { prompt, outputFormat, outputDir })
     }));
 }
 
-function summarizePayload(payload, rawText, savedFiles = []) {
+function summarizePayload(payload: Raw, rawText: Raw, savedFiles: Array<{ index: number; path: string; filename: string }> = []) {
     const hints = findImageHints(payload ?? rawText);
     let out = "## 9router Image Generation Result\n\n";
     if (hints.length > 0) {
@@ -113,40 +105,61 @@ function summarizePayload(payload, rawText, savedFiles = []) {
     return out;
 }
 
-async function call9routerImage(body) {
-    if (!API_KEY) throw new Error("Missing 9ROUTER_IMAGE_API_KEY environment variable");
-    const resp = await fetch(`${BASE_URL}/v1/images/generations`, {
-        method: "POST",
-        headers: {
-            "Content-Type": "application/json",
-            "Authorization": `Bearer ${API_KEY}`,
-            "Accept": "text/event-stream",
-        },
-        body: JSON.stringify(body),
-        signal: AbortSignal.timeout(TIMEOUT_MS),
-    });
-    const text = await resp.text();
-    if (!resp.ok) {
-        const e = safeJsonParse(text);
-        throw new Error(`9router request failed: ${e?.error?.message || e?.detail || text || `HTTP ${resp.status}`}`);
+async function call9routerImage(body: Raw) {
+    if (!config.apiKey) throw new Error("Missing 9ROUTER_IMAGE_API_KEY environment variable");
+    
+    // Model fallback chain: Request model -> Configured model -> Cloudflare Flux & SDXL -> others
+    const fallbackModels = [
+        body.model,
+        config.model,
+        "cloudflare-ai/@cf/black-forest-labs/flux-1-schnell",
+        "cloudflare-ai/@cf/stabilityai/stable-diffusion-xl-base-1.0",
+        "cx/gpt-5.4-image",
+        "antigravity/imagen-3.0-generate-002",
+    ].filter((m, i, arr) => Boolean(m) && arr.indexOf(m) === i);
+
+    let lastError = null;
+    for (const modelCandidate of fallbackModels) {
+        try {
+            const reqBody = { ...body, model: modelCandidate };
+            const resp = await proxyAwareFetch(`${config.baseUrl}/v1/images/generations`, {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                    "Authorization": `Bearer ${config.apiKey}`,
+                    "Accept": "text/event-stream",
+                },
+                body: JSON.stringify(reqBody),
+                timeout: config.timeoutMs,
+            });
+            const text = await resp.text();
+            if (!resp.ok) {
+                const e = safeJsonParse(text);
+                throw new Error(`9router request failed (${modelCandidate}): ${e?.error?.message || e?.detail || text || `HTTP ${resp.status}`}`);
+            }
+            const ct = resp.headers.get("content-type") || "";
+            if (ct.includes("text/event-stream") || text.includes("data:")) {
+                const { events, dataLines } = parseSseBody(text);
+                return [...events].reverse().find(e => e && typeof e === "object") || { events, raw_data_lines: dataLines };
+            }
+            return safeJsonParse(text) ?? text;
+        } catch (e) {
+            lastError = e;
+            console.warn(`[image] Model ${modelCandidate} failed, attempting next fallback... (${errorMessage(e)})`);
+        }
     }
-    const ct = resp.headers.get("content-type") || "";
-    if (ct.includes("text/event-stream") || text.includes("data:")) {
-        const { events, dataLines } = parseSseBody(text);
-        return [...events].reverse().find(e => e && typeof e === "object") || { events, raw_data_lines: dataLines };
-    }
-    return safeJsonParse(text) ?? text;
+    throw lastError || new Error("All image model fallbacks failed");
 }
 
-async function aiUpscaleImage(inputBuffer, { targetWidth, targetHeight, outputFormat }) {
-    if (!API_KEY) throw new Error("Missing 9ROUTER_IMAGE_API_KEY — cannot use AI upscale");
+async function aiUpscaleImage(inputBuffer: Raw, { targetWidth, targetHeight, outputFormat }: Raw) {
+    if (!config.apiKey) throw new Error("Missing 9ROUTER_IMAGE_API_KEY — cannot use AI upscale");
     const mime    = outputFormat === "jpeg" ? "image/jpeg" : outputFormat === "webp" ? "image/webp" : "image/png";
     const dataUri = `data:${mime};base64,${inputBuffer.toString("base64")}`;
     const sizeHint = (targetWidth && targetHeight) ? `${targetWidth}x${targetHeight}` :
                       targetWidth ? `width ${targetWidth}px` :
                       targetHeight ? `height ${targetHeight}px` : "larger";
     const body = {
-        model: DEFAULT_MODEL,
+        model: config.model,
         prompt: `Upscale and enhance this image to ${sizeHint}. Make it sharp, crisp, and high-resolution. Preserve all details, colors, and composition exactly. Do not add new elements.`,
         n: 1,
         size: (targetWidth && targetHeight) ? `${targetWidth}x${targetHeight}` : "auto",
@@ -160,8 +173,8 @@ async function aiUpscaleImage(inputBuffer, { targetWidth, targetHeight, outputFo
     return Buffer.from(images[0].b64Json, "base64");
 }
 
-function resolveCropPreset(preset, imgWidth, imgHeight) {
-    const ratios = { "square": 1, "1:1": 1, "16:9": 16/9, "4:3": 4/3, "3:2": 3/2, "2:1": 2, "9:16": 9/16, "3:4": 3/4 };
+function resolveCropPreset(preset: Raw, imgWidth: Raw, imgHeight: Raw) {
+    const ratios: Record<string, number> = { "square": 1, "1:1": 1, "16:9": 16/9, "4:3": 4/3, "3:2": 3/2, "2:1": 2, "9:16": 9/16, "3:4": 3/4 };
     const targetRatio = ratios[preset];
     if (!targetRatio) throw new Error(`Unknown crop preset "${preset}". Available: ${Object.keys(ratios).join(", ")}`);
     const cur = imgWidth / imgHeight;
@@ -171,7 +184,7 @@ function resolveCropPreset(preset, imgWidth, imgHeight) {
     return { left: Math.floor((imgWidth - cropW) / 2), top: Math.floor((imgHeight - cropH) / 2), width: cropW, height: cropH };
 }
 
-function applyOutputFormat(pipeline, format, quality) {
+function applyOutputFormat(pipeline: Raw, format: Raw, quality: Raw) {
     const q = quality || 85;
     switch (format) {
         case "jpeg": pipeline.jpeg({ quality: q }); break;
@@ -183,7 +196,7 @@ function applyOutputFormat(pipeline, format, quality) {
 }
 
 // ── Tool registration ─────────────────────────────────────────────────────────
-export function registerImageTools(server) {
+export function registerImageTools(server: Raw) {
     server.tool(
         "image_create_image",
         "Generate images via 9router image API using cx/gpt-5.4-image by default.",
@@ -198,9 +211,9 @@ export function registerImageTools(server) {
             model:         z.string().optional().describe("9router image model"),
             output_dir:    z.string().optional().describe("Directory to save generated image files, default: ./temp or 9ROUTER_IMAGE_OUTPUT_DIR"),
         },
-        async ({ prompt, n, size, quality, background, image_detail, output_format, model, output_dir }) => {
+        async ({ prompt, n, size, quality, background, image_detail, output_format, model, output_dir }: Raw) => {
             const body = {
-                model:         model || DEFAULT_MODEL,
+                model:         model || config.model,
                 prompt,
                 n:             n || 1,
                 size:          size || "auto",
@@ -253,14 +266,14 @@ export function registerImageTools(server) {
             ]).optional().describe("Crop the image before resizing."),
             use_ai_upscale: z.boolean().optional().describe("Force AI upscale ON or OFF. Default: auto (AI used only when enlarging)."),
         },
-        async ({ input_path, output_path, output_format, quality, resize, crop, use_ai_upscale }) => {
+        async ({ input_path, output_path, output_format, quality, resize, crop, use_ai_upscale }: Raw) => {
             try {
                 if (!existsSync(input_path)) throw new Error(`Input file not found: ${input_path}`);
 
                 let pipeline = sharp(input_path);
                 const meta   = await pipeline.metadata();
-                const srcW   = meta.width;
-                const srcH   = meta.height;
+                const srcW   = meta.width ?? 0;
+                const srcH   = meta.height ?? 0;
                 const outFmt = output_format || meta.format || "png";
 
                 // Crop
@@ -291,7 +304,7 @@ export function registerImageTools(server) {
                     }
                 }
 
-                const useAI = use_ai_upscale != null ? use_ai_upscale : (isEnlarging && !!API_KEY);
+                const useAI = use_ai_upscale != null ? use_ai_upscale : (isEnlarging && !!config.apiKey);
                 const steps = [];
                 let finalBuffer;
 
@@ -342,7 +355,7 @@ export function registerImageTools(server) {
                 steps.forEach((s, i) => { report += `${i + 1}. ${s}\n`; });
                 report += "\n### Output Info\n";
                 report += `- **Format:** ${outFmt.toUpperCase()}\n- **File size:** ${fileSizeKB} KB\n`;
-                report += `- **Method:** ${useAI && isEnlarging ? `AI upscale (9router ${DEFAULT_MODEL})` : "Local (sharp)"}\n`;
+                report += `- **Method:** ${useAI && isEnlarging ? `AI upscale (9router ${config.model})` : "Local (sharp)"}\n`;
 
                 return ok(report);
             } catch (e) {

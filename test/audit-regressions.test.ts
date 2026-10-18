@@ -1,0 +1,47 @@
+import assert from 'node:assert/strict';
+import { runMetaAnalysis, generateMAICSummary } from '../src/academic/meta-analysis.ts';
+import { assessRiskOfBias } from '../src/academic/risk-of-bias.ts';
+import { fromArxiv, formatCitation } from '../src/academic/formatter.ts';
+import { classifyStance } from '../src/academic/stance.ts';
+import { _isPdfForPaper } from '../src/academic/pdf-finder.ts';
+
+for (const measure of ['HR', 'OR', 'RR']) {
+  const r = runMetaAnalysis({ measure, model: 'fixed', studies: ['A', 'B'].map(name => ({ name, estimate: 1, ciLow: .5, ciHigh: 2 })) });
+  assert.equal(r.pooled.estimate, 1);
+  assert.ok(Math.abs(r.pooled.ciLow - Math.exp(-Math.log(2) / Math.sqrt(2))) < .0001);
+  assert.ok(Math.abs(r.pooled.ciHigh - Math.exp(Math.log(2) / Math.sqrt(2))) < .0001);
+  assert.equal(r.studies[0].ciLow, .5);
+  assert.equal(r.studies[0].ciHigh, 2);
+  assert.ok(runMetaAnalysis({ measure, studies: [{ name: 'missing' }] }).error);
+  assert.ok(runMetaAnalysis({ measure, studies: [{ estimate: 1, ciLow: 2, ciHigh: 3 }] }).error);
+}
+const rawOR = runMetaAnalysis({ measure: 'OR', studies: [{ name: 'counts', e1: 20, n1: 100, e2: 10, n2: 100 }] });
+assert.equal(rawOR.pooled.estimate, 2.25);
+assert.ok(runMetaAnalysis({ measure: 'OR', studies: [{ e1: 101, n1: 100, e2: 1, n2: 100 }] }).error);
+assert.ok(runMetaAnalysis({ measure: 'SMD', studies: [{ name: 'missing' }] }).error);
+const smd = runMetaAnalysis({ measure: 'SMD', studies: [{ m1: 0, m2: 0, s1: 1, s2: 1, n1: 20, n2: 20 }] });
+assert.equal(smd.pooled.estimate, 0);
+assert.ok(generateMAICSummary({ maic: { drugA: 'A', drugB: 'B' } }).error);
+const maic = generateMAICSummary({ maic: { original_n: 100, effective_sample_size: 50, unadjusted_effect: { estimate: 1, ciLow: .5, ciHigh: 2 }, adjusted_effect: { estimate: 1, ciLow: .5, ciHigh: 2 }, matched_variables: [{ variable: 'age' }] } });
+assert.ok(maic.markdown.includes('Not assessed'));
+assert.ok(!maic.markdown.includes('62.5'));
+const rob = assessRiskOfBias({ assessments: [{ study: 'unknown', d1: 'unclear', d2: 'unclear', d3: 'unclear', d4: 'unclear', d5: 'unclear' }] });
+assert.equal(rob.evaluations[0].overall.code, 'U');
+assert.equal(rob.summary.lowRiskCount, 0);
+assert.ok(!rob.trafficLightSVG.includes('Overall Bias: Low Risk'));
+const known = assessRiskOfBias({ assessments: [{ study: 'known', d1: 'low', d2: 'low', d3: 'low', d4: 'low', d5: 'low' }] });
+assert.equal(known.evaluations[0].overall.code, '+');
+const authors = Array.from({ length: 8 }, (_, i) => `Author ${i}`);
+const paper = fromArxiv({ id: 'https://arxiv.org/abs/1706.03762', author: authors, title: 'Fixture', published: '2017-01-01' });
+assert.deepEqual(paper.authors, authors);
+assert.ok(formatCitation(paper, 'bibtex').includes('Author 7'));
+assert.equal(classifyStance({ abstract: 'CONCLUSIONS: Semaglutide reduced BMI in adolescents.' }, 'Does semaglutide reduce major adverse cardiovascular events?').stance, 'unclear');
+assert.equal(classifyStance({ abstract: 'CONCLUSIONS: Treatment reduced major adverse cardiovascular events (HR 0.80; 95% CI 0.72 to 0.90).' }, 'Does treatment reduce major adverse cardiovascular events?').stance, 'yes');
+assert.equal(classifyStance({ abstract: 'CONCLUSIONS: Semaglutide treatment reduced BMI significantly (p < 0.01).' }, 'Does semaglutide reduce headache?').stance, 'unclear');
+assert.equal(classifyStance({ abstract: 'CONCLUSIONS: Treatment reduced BMI significantly (p < 0.01).' }, 'Does treatment reduce pain?').stance, 'unclear');
+assert.equal(classifyStance({ abstract: 'CONCLUSIONS: Treatment reduced pain significantly (p < 0.01).' }, 'Does treatment reduce pain?').stance, 'yes');
+console.log('Audit regression contracts passed');
+const target = { title: 'Oral Semaglutide and Cardiovascular Outcomes in High-Risk Type 2 Diabetes', doi: '10.1056/NEJMoa2501006' };
+assert.equal(_isPdfForPaper({ title: 'Cardiovascular outcomes of oral incretin-based drugs in type 2 diabetes: a meta-analysis', url: 'https://example.org/review.pdf', content: target.doi }, target), false);
+assert.equal(_isPdfForPaper({ title: target.title, url: 'https://example.org/paper.pdf' }, target), true);
+assert.equal(_isPdfForPaper({ title: 'Publisher PDF', url: 'https://example.org/10.1056/NEJMoa2501006.pdf' }, target), true);

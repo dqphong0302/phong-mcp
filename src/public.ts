@@ -13,10 +13,10 @@
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { registerImageTools } from "./image/index.js";
-import { registerConsensusTools } from "./consensus/index.js";
-import { registerPerplexityTools } from "./perplexity/index.js";
-import { registerDistillTool } from "./distill/index.js";
+import { registerImageTools } from "./image/index.ts";
+import { registerConsensusTools } from "./consensus/index.ts";
+import { registerPerplexityTools } from "./perplexity/index.ts";
+import { registerDistillTool } from "./distill/index.ts";
 
 const TRANSPORT = process.env.TRANSPORT || "stdio";
 const PORT = parseInt(process.env.PORT || "3100", 10);
@@ -36,7 +36,7 @@ async function main() {
 
   if (TRANSPORT === "http") {
     // Dynamic import to avoid loading http deps in stdio mode
-    const { startHttpTransport } = await import("./transport-http.js");
+    const { startHttpTransport } = await import("./transport-http.ts");
     await startHttpTransport(server, PORT);
   } else {
     const transport = new StdioServerTransport();

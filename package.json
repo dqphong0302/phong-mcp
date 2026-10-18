@@ -3,14 +3,40 @@
   "version": "1.0.0",
   "description": "Unified MCP Server for Antigravity",
   "type": "module",
-  "main": "src/index.js",
+  "main": "src/index.ts",
+  "bin": {
+    "phong-academic": "src/entries/academic.ts",
+    "phong-image": "src/entries/image.ts",
+    "phong-content": "src/entries/content.ts",
+    "phong-fetch": "src/entries/fetch.ts",
+    "phong-research": "src/entries/research.ts",
+    "phong-ops": "src/entries/ops.ts"
+  },
   "scripts": {
-    "start": "node src/index.js"
+    "test": "node test/audit-regressions.test.ts && node test/bridge-concurrency.test.ts && node test/bridge-recovery.test.ts && node test/stance.test.ts && node test/biorxiv-api.test.ts && node test/test-zero-token-tools.ts",
+    "start": "node src/index.ts",
+    "academic": "node src/entries/academic.ts",
+    "image": "node src/entries/image.ts",
+    "content": "node src/entries/content.ts",
+    "fetch": "node src/entries/fetch.ts",
+    "research": "node src/entries/research.ts",
+    "ops": "node src/entries/ops.ts",
+    "http": "node src/entries/http.ts",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.4.1",
+    "@modelcontextprotocol/sdk": "^1.12.0",
     "sharp": "^0.33.5",
+    "turndown": "^7.2.0",
     "undici": "^6.20.0",
     "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/turndown": "^5.0.5",
+    "typescript": "^5.9.0"
+  },
+  "engines": {
+    "node": ">=22.18.0"
   }
 }

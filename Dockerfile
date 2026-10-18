@@ -22,4 +22,4 @@ ENV NODE_ENV=production
 EXPOSE 3100
 
 # Use public entry point (no ops/tts)
-CMD ["node", "src/public.js"]
+CMD ["node", "src/public.ts"]
