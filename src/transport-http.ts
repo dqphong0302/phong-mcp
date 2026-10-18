@@ -62,13 +62,28 @@ export async function startHttpTransport(port: Raw, createServer?: Raw) {
       const sessionId = req.headers["mcp-session-id"];
       let transport: Raw;
 
+      // The SDK rejects (406) clients that do not accept both JSON and SSE, but the
+      // stdio bridge and the retired Rust gateway only ever used "application/json".
+      // Serve those clients plain JSON replies instead of failing them.
+      const accept = String(req.headers.accept ?? "");
+      const jsonOnly = !accept.includes("text/event-stream");
+      if (jsonOnly) {
+        const both = "application/json, text/event-stream";
+        req.headers.accept = both;
+        // The SDK's Node->Web request adapter reads rawHeaders, so patch those too.
+        const raw = req.rawHeaders;
+        const i = raw.findIndex((h, n) => n % 2 === 0 && h.toLowerCase() === "accept");
+        if (i >= 0) raw[i + 1] = both; else raw.push("Accept", both);
+      }
+
       if (sessionId && streamableSessions.has(sessionId)) {
         transport = streamableSessions.get(sessionId);
       } else if (!sessionId) {
         const mcp = createServer();
         transport = new StreamableHTTPServerTransport({
           sessionIdGenerator: () => crypto.randomUUID(),
-          onsessioninitialized: (sid) => {
+          enableJsonResponse: jsonOnly,
+          onsessioninitialized: (sid: string) => {
             streamableSessions.set(sid, transport);
             console.error(`[${NAME}] Streamable session: ${sid} (active: ${streamableSessions.size})`);
           },
